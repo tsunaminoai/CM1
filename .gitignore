@@ -12,3 +12,7 @@ src/*.f90
 src/*.o
 src/*.mod
 .vscode/settings.json
+.zig-cache
+zig-out/
+.devbox/
+.envrc
