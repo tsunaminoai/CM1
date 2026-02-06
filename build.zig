@@ -139,7 +139,8 @@ pub fn build(b: *std.Build) void {
         const obj_path = b.pathJoin(&.{ work_dir, b.fmt("{s}.o", .{base_name}) });
 
         // Step 1: cpp
-        const cpp_cmd = b.addSystemCommand(&.{"cpp"});
+        const cpp_cmd = b.addSystemCommand(&.{"zig"});
+        cpp_cmd.addArg("cc");
         cpp_cmd.addArg("-C");
         cpp_cmd.addArg("-P");
         cpp_cmd.addArg("-traditional");

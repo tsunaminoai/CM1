@@ -27,7 +27,10 @@
         commonNativeBuildInputs = [
           zig
           pkgs.gfortran
-          pkgs.gcc # provides cpp preprocessor
+          pkgs.gcc
+          pkgs.openmpi
+          pkgs.netcdf
+          pkgs.netcdffortran
         ];
 
         # Common runtime data files installation
