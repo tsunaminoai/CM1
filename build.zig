@@ -1,28 +1,6 @@
 const std = @import("std");
 
-// ============================================================================
-// CM1 Numerical Model — Zig Build Pipeline
-//
-// This build.zig replaces the traditional Makefile for compiling CM1.
-// It drives the C preprocessor (cpp) and a Fortran compiler (gfortran)
-// through zig's build system, respecting the module dependency order.
-//
-// Usage:
-//   zig build                          # basic single-processor build
-//   zig build -Duse_mpi=true           # MPI distributed memory
-//   zig build -Duse_netcdf=true        # with NetCDF output
-//   zig build -Duse_openmp=true        # OpenMP shared memory
-//   zig build -Ddebug=true             # debug build
-//   zig build clean                    # remove build artifacts
-//
-// The resulting binary is placed in zig-out/bin/cm1.exe
-// ============================================================================
-
-/// Source files in dependency-safe (topologically sorted) compilation order.
-/// Derived from the Makefile dependency graph. Files providing Fortran modules
-/// must be compiled before files that USE those modules.
 const sources_ordered = [_][]const u8{
-    // ── Tier 0: No module dependencies ──
     "constants.F",
     "ccpp_kind_types.F",
     "getcape.F",
@@ -40,7 +18,6 @@ const sources_ordered = [_][]const u8{
     "slab.F",
     "stopcm1.F",
 
-    // ── Tier 1: Depend only on Tier 0 ──
     "bc.F",
     "bl_ysu.F",
     "cm1libs.F",
@@ -70,7 +47,6 @@ const sources_ordered = [_][]const u8{
     "testcase_simple_phys.F",
     "writeout_nc.F",
 
-    // ── Tier 2: Depend on Tier 0–1 ──
     "comm.F",
     "goddard.F",
     "module_bl_mynn.F",
@@ -83,7 +59,6 @@ const sources_ordered = [_][]const u8{
     "thompson.F",
     "turbtend.F",
 
-    // ── Tier 3: Depend on Tier 0–2 ──
     "azimavg.F",
     "base.F",
     "ib_module.F",
@@ -97,7 +72,6 @@ const sources_ordered = [_][]const u8{
     "restart_read.F",
     "turbnba.F",
 
-    // ── Tier 4: Depend on Tier 0–3 ──
     "adv_routines.F",
     "anelp.F",
     "init_physics.F",
@@ -111,14 +85,12 @@ const sources_ordered = [_][]const u8{
     "statpack.F",
     "writeout.F",
 
-    // ── Tier 5: Depend on Tier 0–4 ──
     "adv.F",
     "init_terrain.F",
     "mp_driver.F",
     "solve3.F",
     "turb.F",
 
-    // ── Tier 6: Depend on Tier 0–5 ──
     "domaindiag.F",
     "hifrq.F",
     "init3d.F",
@@ -126,166 +98,172 @@ const sources_ordered = [_][]const u8{
     "pdcomp.F",
     "solve2.F",
 
-    // ── Tier 7: Main program ──
     "cm1.F",
 };
 
 pub fn build(b: *std.Build) void {
-    // ── User-configurable options ──────────────────────────────────────
+    // const target = b.standardTargetOptions(.{}); // -Dtarget, -Dcpu.[web:19][web:21]
+    // const optimize = b.standardOptimizeOption(.{}); // -Doptimize.[web:19][web:24]
+
+    // Project‑specific toggles
     const use_mpi = b.option(bool, "use_mpi", "Enable MPI distributed memory") orelse false;
-    const use_openmp = b.option(bool, "use_openmp", "Enable OpenMP shared memory") orelse false;
-    const use_netcdf = b.option(bool, "use_netcdf", "Enable NetCDF output") orelse false;
-    const use_double = b.option(bool, "use_double", "Enable double precision (gfortran -fdefault-real-8)") orelse false;
-    const debug_mode = b.option(bool, "debug", "Enable debug build (-O0 -g)") orelse false;
-    const netcdf_base: ?[]const u8 = b.option([]const u8, "netcdf_base", "Path to NetCDF installation prefix (or set NETCDFBASE env var)");
+    // const use_openmp = b.option(bool, "use_openmp", "Enable OpenMP shared memory") orelse false;
+    // const use_netcdf = b.option(bool, "use_netcdf", "Enable NetCDF output") orelse false;
+    // const use_double = b.option(bool, "use_double", "Enable double precision (gfortran -fdefault-real-8)") orelse false;
+    // const debug_mode = b.option(bool, "debug", "Enable debug build (-O0 -g)") orelse false;
+    // const netcdf_base = b.option([]const u8, "netcdf_base", "Path to NetCDF installation prefix");
     const fortran_compiler: []const u8 = b.option([]const u8, "fc", "Fortran compiler to use") orelse
         (if (use_mpi) "mpifort" else "gfortran");
 
-    // ── Generate build shell script ────────────────────────────────────
-    // Fortran modules (.mod) are side-effects of compilation and must live
-    // in a single shared directory. We generate a self-contained sh script
-    // that preprocesses and compiles each source in topological order,
-    // then links the final binary — matching the original Makefile behavior.
+    // Layout: keep sources under src/, intermediates under cache_root, final exe in zig-out/bin
+    const src_dir = "src";
+    const work_dir = b.cache_root.join(b.allocator, &.{"cm1-work"}) catch @panic("OOM");
+    const out_dir = b.getInstallPath(.bin, "");
 
-    const wf = b.addWriteFiles();
-    const script_content = generateBuildScript(
-        b.allocator,
-        fortran_compiler,
-        use_mpi,
-        use_openmp,
-        use_netcdf,
-        use_double,
-        debug_mode,
-        netcdf_base,
-    );
-    _ = wf.add("build_cm1.sh", script_content);
+    // Base flags reused in commands
+    // const cpp_defs = makeCppDefs(b.allocator, use_mpi, use_openmp, use_netcdf, use_double, debug_mode);
+    // const fflags = makeFFlags(b.allocator, use_openmp, use_double, use_netcdf, netcdf_base, debug_mode);
+    // const link_flags = makeLinkFlags(b.allocator, use_openmp);
+    // const link_libs = makeLinkLibs(b.allocator, use_netcdf, netcdf_base);
 
-    // ── Run the build script ───────────────────────────────────────────
-    const build_run = b.addSystemCommand(&.{"sh"});
-    build_run.addFileArg(wf.getDirectory().path(b, "build_cm1.sh"));
+    // For each source, create two steps:
+    //   1) cpp:  src/F -> work/F.f90
+    //   2) fc:   work/F.f90 -> work/F.o
+    var object_paths = std.ArrayList([]const u8){};
 
-    // Positional args: SRC_DIR, OUT_DIR, WORK_DIR
-    build_run.addArg(b.pathFromRoot("src"));
-    build_run.addArg(b.getInstallPath(.bin, ""));
-    // Use a stable work directory under the zig cache for .mod/.o intermediates
-    build_run.addArg(b.pathJoin(&.{ b.cache_root.path orelse ".", "cm1-work" }));
+    for (sources_ordered) |src_name| {
+        const base_name = stripSuffixF(b, src_name); // "foo.F" -> "foo"
 
-    b.getInstallStep().dependOn(&build_run.step);
+        const src_path = b.pathJoin(&.{ src_dir, src_name });
+        const f90_path = b.pathJoin(&.{ work_dir, b.fmt("{s}.f90", .{base_name}) });
+        const obj_path = b.pathJoin(&.{ work_dir, b.fmt("{s}.o", .{base_name}) });
 
-    // ── "clean" step ───────────────────────────────────────────────────
+        // Step 1: cpp
+        const cpp_cmd = b.addSystemCommand(&.{"cpp"});
+        cpp_cmd.addArg("-C");
+        cpp_cmd.addArg("-P");
+        cpp_cmd.addArg("-traditional");
+        cpp_cmd.addArg("-ffreestanding");
+        // cpp_cmd.addArgs(std.mem.tokenizeAny(u8, cpp_defs, " "));
+        cpp_cmd.addFileArg(b.path(src_path));
+        cpp_cmd.addArg("-o");
+        cpp_cmd.addArg(f90_path);
+
+        // Step 2: Fortran compile
+        const fc_cmd = b.addSystemCommand(&.{fortran_compiler});
+        fc_cmd.step.dependOn(&cpp_cmd.step);
+        // fc_cmd.addArgs(std.mem.tokenizeAny(u8, fflags, " "));
+        fc_cmd.addFileArg(b.path(f90_path));
+        fc_cmd.addArg("-c");
+        fc_cmd.addArg("-o");
+        fc_cmd.addArg(obj_path);
+
+        object_paths.append(b.allocator, obj_path) catch @panic("OOM");
+    }
+
+    // Link step: cm1.exe
+    const exe_name = "cm1.exe";
+    const exe_path = b.pathJoin(&.{ out_dir, exe_name });
+
+    const link_cmd = b.addSystemCommand(&.{fortran_compiler});
+    for (object_paths.items) |obj| {
+        link_cmd.addFileArg(b.path(obj));
+    }
+    // link_cmd.addArgs(std.mem.tokenizeAny(u8, link_flags, " "));
+    // link_cmd.addArgs(std.mem.tokenizeAny(u8, link_libs, " "));
+    link_cmd.addArg("-o");
+    link_cmd.addArg(exe_path);
+
+    const install_step = b.getInstallStep();
+    install_step.dependOn(&link_cmd.step);
+
+    // Clean step: remove Zig outputs and our work dir
     const clean_step = b.step("clean", "Remove build artifacts");
     const clean_cmd = b.addSystemCommand(&.{
-        "sh",                                             "-c",
-        "rm -rf zig-out .zig-cache && rm -f run/cm1.exe",
+        "sh",
+        "-c",
+        b.fmt("rm -rf {s} .zig-cache {s}", .{ out_dir, work_dir }),
     });
     clean_step.dependOn(&clean_cmd.step);
 }
 
-/// Generates a self-contained POSIX shell script that builds CM1.
-fn generateBuildScript(
+fn stripSuffixF(_: *std.Build, src_name: []const u8) []const u8 {
+    // naive but sufficient: assume ".F"
+    if (std.mem.endsWith(u8, src_name, ".F")) {
+        return src_name[0 .. src_name.len - 2];
+    }
+    return src_name;
+}
+
+fn makeCppDefs(
     allocator: std.mem.Allocator,
-    fc: []const u8,
     use_mpi: bool,
     use_openmp: bool,
     use_netcdf: bool,
     use_double: bool,
     debug_mode: bool,
-    netcdf_base: ?[]const u8,
 ) []const u8 {
-    var buf = std.ArrayListUnmanaged(u8){};
+    var buf = std.ArrayList(u8){};
+    if (use_mpi) _ = buf.appendSlice(allocator, " -DMPI") catch @panic("OOM");
+    if (use_openmp) _ = buf.appendSlice(allocator, " -DOPENMP") catch @panic("OOM");
+    if (use_double) _ = buf.appendSlice(allocator, " -DDP") catch @panic("OOM");
+    if (use_netcdf) _ = buf.appendSlice(allocator, " -DNETCDF -DNCFPLUS") catch @panic("OOM");
+    if (debug_mode) _ = buf.appendSlice(allocator, " -D_B4B") catch @panic("OOM");
+    return buf.toOwnedSlice(allocator) catch @panic("OOM");
+}
 
-    emit(allocator, &buf, "#!/bin/sh\nset -e\n\n");
-    emit(allocator, &buf, "# CM1 Build Script (generated by build.zig)\n\n");
-    emit(allocator, &buf, "SRC_DIR=\"$1\"\nOUT_DIR=\"$2\"\nWORK_DIR=\"$3\"\n\n");
-    emit(allocator, &buf, "if [ -z \"$SRC_DIR\" ] || [ -z \"$OUT_DIR\" ] || [ -z \"$WORK_DIR\" ]; then\n");
-    emit(allocator, &buf, "    echo \"Usage: $0 <src_dir> <out_dir> <work_dir>\"\n    exit 1\nfi\n\n");
-    emit(allocator, &buf, "mkdir -p \"$WORK_DIR\" \"$OUT_DIR\"\ncd \"$WORK_DIR\"\n\n");
+fn makeFFlags(
+    allocator: std.mem.Allocator,
+    use_openmp: bool,
+    use_double: bool,
+    use_netcdf: bool,
+    netcdf_base: ?[]const u8,
+    debug_mode: bool,
+) []const u8 {
+    var buf = std.ArrayList(u8){};
+    _ = buf.appendSlice(allocator, "-ffree-form -ffree-line-length-none -fallow-argument-mismatch") catch @panic("OOM");
 
-    // Compiler
-    emitFmt(allocator, &buf, "FC=\"{s}\"\n", .{fc});
-
-    // CPP defines
-    emit(allocator, &buf, "CPP_DEFS=\"");
-    if (use_mpi) emit(allocator, &buf, " -DMPI");
-    if (use_openmp) emit(allocator, &buf, " -DOPENMP");
-    if (use_double) emit(allocator, &buf, " -DDP");
-    if (use_netcdf) emit(allocator, &buf, " -DNETCDF -DNCFPLUS");
-    if (debug_mode) emit(allocator, &buf, " -D_B4B");
-    emit(allocator, &buf, "\"\n");
-
-    // Fortran flags
-    emit(allocator, &buf, "FFLAGS=\"-ffree-form -ffree-line-length-none -fallow-argument-mismatch");
     if (debug_mode) {
-        emit(allocator, &buf, " -g -O0 -fcheck=all -fbacktrace");
+        _ = buf.appendSlice(allocator, " -g -O0 -fcheck=all -fbacktrace") catch @panic("OOM");
     } else {
-        emit(allocator, &buf, " -O2 -finline-functions");
+        _ = buf.appendSlice(allocator, " -O2 -finline-functions") catch @panic("OOM");
     }
-    if (use_openmp) emit(allocator, &buf, " -fopenmp");
-    if (use_double) emit(allocator, &buf, " -fdefault-real-8");
+
+    if (use_openmp) _ = buf.appendSlice(allocator, " -fopenmp") catch @panic("OOM");
+    if (use_double) _ = buf.appendSlice(allocator, " -fdefault-real-8") catch @panic("OOM");
+
     if (use_netcdf) {
         if (netcdf_base) |base| {
-            emitFmt(allocator, &buf, " -I{s}/include", .{base});
+            _ = buf.appendSlice(allocator, " -I") catch @panic("OOM");
+            _ = buf.appendSlice(allocator, base) catch @panic("OOM");
+            _ = buf.appendSlice(allocator, "/include") catch @panic("OOM");
         }
     }
-    emit(allocator, &buf, "\"\n\n");
-
-    // Link flags
-    emit(allocator, &buf, "LINK_FLAGS=\"");
-    if (use_openmp) emit(allocator, &buf, " -fopenmp");
-    emit(allocator, &buf, "\"\n");
-
-    emit(allocator, &buf, "LINK_LIBS=\"");
-    if (use_netcdf) {
-        if (netcdf_base) |base| {
-            emitFmt(allocator, &buf, " -L{s}/lib", .{base});
-        }
-        emit(allocator, &buf, " -lnetcdf -lnetcdff");
-    }
-    emit(allocator, &buf, "\"\n\n");
-
-    // Compile function + progress counter
-    emitFmt(allocator, &buf, "TOTAL={d}\n", .{sources_ordered.len});
-    emit(allocator, &buf, "COUNT=0\n\n");
-    emit(allocator, &buf, "compile_source() {\n");
-    emit(allocator, &buf, "    src=\"$1\"\n");
-    emit(allocator, &buf, "    base=\"${src%.F}\"\n");
-    emit(allocator, &buf, "    COUNT=$((COUNT + 1))\n");
-    emit(allocator, &buf, "    printf \"  [%2d/%d] cpp   %s\\n\" \"$COUNT\" \"$TOTAL\" \"$src\"\n");
-    emit(allocator, &buf, "    cpp -C -P -traditional -ffreestanding $CPP_DEFS \"$SRC_DIR/$src\" > \"${base}.f90\"\n");
-    emit(allocator, &buf, "    printf \"  [%2d/%d] fc    %s.f90\\n\" \"$COUNT\" \"$TOTAL\" \"$base\"\n");
-    emit(allocator, &buf, "    $FC $FFLAGS -c \"${base}.f90\"\n");
-    emit(allocator, &buf, "}\n\n");
-
-    emit(allocator, &buf, "echo \"=== CM1 Build ===\"\n");
-    emit(allocator, &buf, "echo \"Compiler : $FC\"\n");
-    emit(allocator, &buf, "echo \"Flags    : $FFLAGS\"\n");
-    emit(allocator, &buf, "echo \"CPP defs : $CPP_DEFS\"\n");
-    emit(allocator, &buf, "echo \"\"\n\n");
-
-    // Compile each source in topological order
-    for (sources_ordered) |src| {
-        emitFmt(allocator, &buf, "compile_source \"{s}\"\n", .{src});
-    }
-
-    // Link
-    emit(allocator, &buf, "\necho \"\"\nprintf \"  [link] cm1.exe\\n\"\n");
-    emit(allocator, &buf, "$FC $LINK_FLAGS");
-    for (sources_ordered) |src| {
-        const base = src[0 .. src.len - 2];
-        emitFmt(allocator, &buf, " \"{s}.o\"", .{base});
-    }
-    emit(allocator, &buf, " $LINK_LIBS -o \"$OUT_DIR/cm1.exe\"\n\n");
-    emit(allocator, &buf, "echo \"\"\necho \"=== Build complete: $OUT_DIR/cm1.exe ===\"\n");
 
     return buf.toOwnedSlice(allocator) catch @panic("OOM");
 }
 
-/// Append a literal string to the script buffer.
-fn emit(allocator: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), str: []const u8) void {
-    buf.appendSlice(allocator, str) catch @panic("OOM");
+fn makeLinkFlags(allocator: std.mem.Allocator, use_openmp: bool) []const u8 {
+    var buf = std.ArrayList(u8){};
+    if (use_openmp) _ = buf.appendSlice(allocator, " -fopenmp") catch @panic("OOM");
+    return buf.toOwnedSlice(allocator) catch @panic("OOM");
 }
 
-/// Append a formatted string to the script buffer.
-fn emitFmt(allocator: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), comptime fmt: []const u8, args: anytype) void {
-    buf.print(allocator, fmt, args) catch @panic("OOM");
+fn makeLinkLibs(
+    allocator: std.mem.Allocator,
+    use_netcdf: bool,
+    netcdf_base: ?[]const u8,
+) []const u8 {
+    var buf = std.ArrayList(u8){};
+
+    if (use_netcdf) {
+        if (netcdf_base) |base| {
+            _ = buf.appendSlice(allocator, " -L") catch @panic("OOM");
+            _ = buf.appendSlice(allocator, base) catch @panic("OOM");
+            _ = buf.appendSlice(allocator, "/lib") catch @panic("OOM");
+        }
+        _ = buf.appendSlice(allocator, " -lnetcdf -lnetcdff") catch @panic("OOM");
+    }
+
+    return buf.toOwnedSlice(allocator) catch @panic("OOM");
 }
