@@ -1,0 +1,23 @@
+{
+  "$schema": "https://raw.githubusercontent.com/jetify-com/devbox/0.14.2/.schema/devbox.schema.json",
+  "packages": [
+    "zig@latest",
+    "zls@latest",
+    "watchexec@latest",
+    "gfortran@latest",
+    "mpi@latest",
+    "netcdf@latest",
+    "openmpi@latest"
+  ],
+  "shell": {
+    "init_hook": [
+      "export ZIG_GLOBAL_CACHE_DIR=.zig-cache",
+      "echo 'Welcome to devbox!' > /dev/null"
+    ],
+    "scripts": {
+      "test": [
+        "echo \"Error: no test specified\" && exit 1"
+      ]
+    }
+  }
+}
