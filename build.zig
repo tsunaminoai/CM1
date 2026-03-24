@@ -341,6 +341,32 @@ pub fn build(b: *std.Build) void {
     const clean = b.step("clean", "Remove build artifacts from src/");
     clean.dependOn(&clean_step.step);
 
+    // ── Bench-make: original Makefile build for timing comparison ─────────────
+    // Usage:
+    //   time zig build clean && time zig build           # Zig build
+    //   time zig build bench-make                        # Make build (serial, gfortran)
+    //   time zig build bench-make -- -j$(nproc)          # Make build (parallel)
+    //
+    // Note: bench-make always starts from a clean src/ so times are comparable.
+    const fc_str = switch (compiler) {
+        .gfortran => "gfortran",
+        .ifort => "ifort",
+        .nvfortran => "nvfortran",
+        .ftn => "ftn",
+    };
+    const make_cmd = b.fmt(
+        "cd src && make clean && make FC={s}{s}{s}{s}",
+        .{
+            fc_str,
+            if (use_mpi) " USE_MPI=true" else "",
+            if (use_netcdf) " USE_NETCDF=true" else "",
+            if (use_openmp) " USE_OPENMP=true" else "",
+        },
+    );
+    const bench_make_step = b.addSystemCommand(&.{ "sh", "-c", make_cmd });
+    const bench_make = b.step("bench-make", "Build via original Makefile for timing comparison");
+    bench_make.dependOn(&bench_make_step.step);
+
     // ── Namelist generator (Zig utility) ──────────────────────────────────────
     const namelist_exe = b.addExecutable(.{
         .name = "generate_namelist",
