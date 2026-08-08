@@ -5,7 +5,6 @@
     "zls@latest",
     "watchexec@latest",
     "gfortran@latest",
-    "mpi@latest",
     "netcdf@latest",
     "openmpi@latest"
   ],

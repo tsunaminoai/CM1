@@ -20,8 +20,8 @@
           overlays = [zig-overlay.overlays.default];
         };
 
-        # Zig 0.15.2 — pinned version
-        zig = pkgs.zigpkgs."0.15.2";
+        # Latest stable Zig from the overlay
+        zig = pkgs.zigpkgs."0.16.0";
 
         # Common build inputs for all CM1 variants
         commonNativeBuildInputs = [
@@ -97,7 +97,6 @@
           # ── Serial (single-process) build ────────────────────────────
           cm1 = mkCm1 {
             pname = "cm1";
-            zigFlags = "-Dgfortran-libdir=${pkgs.gfortran.cc.lib}/lib";
             description = "CM1 Numerical Model (Cloud Model 1) for atmospheric research";
           };
 
@@ -112,7 +111,7 @@
           # ── NetCDF build ─────────────────────────────────────────────
           cm1-netcdf = mkCm1 {
             pname = "cm1-netcdf";
-            zigFlags = "-Dnetcdf=true -Dnetcdf-base=${pkgs.netcdffortran} -Dgfortran-libdir=${pkgs.gfortran.cc.lib}/lib";
+            zigFlags = "-Dnetcdf=true -Dnetcdf-base=${pkgs.netcdffortran}";
             extraBuildInputs = [pkgs.netcdf pkgs.netcdffortran];
             description = "CM1 Numerical Model with NetCDF output support";
           };

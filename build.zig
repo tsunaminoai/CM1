@@ -128,25 +128,6 @@ pub fn build(b: *std.Build) void {
         "netcdf-base",
         "Path to NetCDF installation (e.g. $NETCDFBASE)",
     );
-    const gfortran_libdir = b.option(
-        []const u8,
-        "gfortran-libdir",
-        "Path to libgfortran directory (for zig cc linker; auto-detected from gfortran if omitted)",
-    );
-
-    // Auto-detect libgfortran directory when using zig cc as linker (non-MPI).
-    // Runs `gfortran --print-file-name=libgfortran.so` at configure time to
-    // find the directory without requiring the user to pass -Dgfortran-libdir.
-    const resolved_libdir: ?[]const u8 = if (!use_mpi and gfortran_libdir == null) blk: {
-        const result = std.process.Child.run(.{
-            .allocator = b.allocator,
-            .argv = &.{ "gfortran", "--print-file-name=libgfortran.so" },
-            .max_output_bytes = 4096,
-        }) catch break :blk null;
-        const path = std.mem.trimRight(u8, result.stdout, " \t\r\n");
-        break :blk if (std.fs.path.isAbsolute(path)) std.fs.path.dirname(path) else null;
-    } else gfortran_libdir;
-
     // ── Resolve Fortran compiler binary ───────────────────────────────────────
     const fc: []const u8 = if (use_mpi) "mpifort" else switch (compiler) {
         .gfortran => "gfortran",
@@ -154,6 +135,23 @@ pub fn build(b: *std.Build) void {
         .nvfortran => "nvfortran",
         .ftn => "ftn",
     };
+
+    // Fortran .mod files are compiler-version-locked, so a toolchain swap under
+    // an otherwise identical argv must invalidate cached objects. The version
+    // is written to a stamp file that each compile/link step declares as an
+    // input, putting its content into the cache manifest. (An environment
+    // variable won't do: setting one clones the whole ambient environment into
+    // the manifest, and any transient variable then defeats caching.)
+    const fc_version: []const u8 = blk: {
+        var exit_code: u8 = undefined;
+        const stdout = b.runAllowFail(
+            &.{ fc, "--version" },
+            &exit_code,
+            .ignore,
+        ) catch break :blk "unknown";
+        break :blk stdout[0 .. std.mem.indexOfScalar(u8, stdout, '\n') orelse stdout.len];
+    };
+    const fc_stamp = b.addWriteFiles().add("fc-version.txt", fc_version);
 
     // ── CPP preprocessor defines ──────────────────────────────────────────────
     // In Zig 0.15, ArrayList is unmanaged: allocator passed to every call.
@@ -223,14 +221,28 @@ pub fn build(b: *std.Build) void {
         }
     }
 
-    // ── Shared module (.mod) output directory ─────────────────────────────────
-    // All compile steps write to and read from this directory so that
-    // Fortran USE statements resolve correctly across source files.
-    const mods_dir = b.makeTempPath();
+    // ── Module dependency closure ─────────────────────────────────────────────
+    // Each compile step writes its .mod files to its own declared output
+    // directory and reads dependencies' .mod files via -I. gfortran needs the
+    // .mod of every module a file USEs directly, but the Makefile-derived edge
+    // list was written under a shared module directory where under-declared
+    // transitive edges were masked — so wire the transitive closure. `sources`
+    // is topologically ordered, so one forward pass suffices.
+    var closures = std.StringHashMap([]const []const u8).init(b.allocator);
+    for (sources) |src| {
+        var set: std.StringArrayHashMapUnmanaged(void) = .empty;
+        for (src.deps) |dep| {
+            set.put(b.allocator, dep, {}) catch unreachable;
+            for (closures.get(dep).?) |transitive| {
+                set.put(b.allocator, transitive, {}) catch unreachable;
+            }
+        }
+        closures.put(src.name, set.keys()) catch unreachable;
+    }
 
     // ── Per-source build steps ────────────────────────────────────────────────
-    var object_steps = std.StringHashMap(*std.Build.Step.Run).init(b.allocator);
-    defer object_steps.deinit();
+    var mod_dirs = std.StringHashMap(std.Build.LazyPath).init(b.allocator);
+    defer mod_dirs.deinit();
 
     var object_files: std.ArrayList(std.Build.LazyPath) = .empty;
     defer object_files.deinit(b.allocator);
@@ -241,7 +253,7 @@ pub fn build(b: *std.Build) void {
         // Step 1: CPP preprocessing (.F → .f90) using zig cc (bundled clang).
         // Using zig cc means no separate cpp tool required.
         const cpp_step = b.addSystemCommand(&.{
-            "zig", "cc",
+            b.graph.zig_exe, "cc",
             "-x",   "c",
             "-E",   "-P",
             "-ffreestanding",
@@ -255,70 +267,52 @@ pub fn build(b: *std.Build) void {
 
         // Step 2: Fortran compilation (.f90 → .o)
         const compile_step = b.addSystemCommand(&.{fc});
-        compile_step.step.dependOn(&cpp_step.step);
+        compile_step.addFileInput(fc_stamp);
         for (fc_flags.items) |flag| compile_step.addArg(flag);
 
-        // Module directory: write .mod files here and search here.
-        switch (compiler) {
-            .gfortran, .ftn => {
-                compile_step.addArg(b.fmt("-J{s}", .{mods_dir}));
-                compile_step.addArg(b.fmt("-I{s}", .{mods_dir}));
-            },
-            .ifort, .nvfortran => {
+        // Emitted .mod files land in this step's own declared output directory
+        // so the cache tracks them alongside the .o.
+        const mods_lp = switch (compiler) {
+            .gfortran, .ftn => compile_step.addPrefixedOutputDirectoryArg("-J", "mods"),
+            .ifort, .nvfortran => blk: {
                 compile_step.addArg("-module");
-                compile_step.addArg(mods_dir);
-                compile_step.addArg(b.fmt("-I{s}", .{mods_dir}));
+                break :blk compile_step.addOutputDirectoryArg("mods");
             },
+        };
+
+        // Search every (transitive) dependency's module directory. These are
+        // content-addressed paths, so this also hashes the dependency chain
+        // into this step's cache manifest and wires the step dependencies.
+        for (closures.get(src.name).?) |dep_name| {
+            compile_step.addPrefixedDirectoryArg("-I", mod_dirs.get(dep_name).?);
         }
+
         compile_step.addArg("-c");
         compile_step.addFileArg(f90_lp);
         compile_step.addArg("-o");
         const obj_lp = compile_step.addOutputFileArg(b.fmt("{s}.o", .{src.name}));
 
-        // Wire Fortran module dependencies.
-        // Sources are listed in topological order above, so all deps are
-        // already in object_steps when we get here.
-        for (src.deps) |dep_name| {
-            if (object_steps.get(dep_name)) |dep_step| {
-                compile_step.step.dependOn(&dep_step.step);
-            }
-        }
-
-        object_steps.put(src.name, compile_step) catch unreachable;
+        mod_dirs.put(src.name, mods_lp) catch unreachable;
         object_files.append(b.allocator, obj_lp) catch unreachable;
     }
 
     // ── Link step ─────────────────────────────────────────────────────────────
-    // MPI builds use mpifort which handles MPI link flags automatically.
-    // Non-MPI builds use zig cc (no Fortran flags — zig cc doesn't accept them).
-    const link_step = if (use_mpi)
-        b.addSystemCommand(&.{"mpifort"})
-    else
-        b.addSystemCommand(&.{ "zig", "cc" });
-
-    if (use_mpi) {
-        // mpifort (= gfortran wrapper) accepts and ignores compile-only flags.
-        for (fc_flags.items) |flag| link_step.addArg(flag);
-    }
+    // Always link with the Fortran driver: it knows its own runtime libraries
+    // (libgfortran, libgomp via -fopenmp, ...), and mpifort adds MPI's.
+    const link_step = b.addSystemCommand(&.{fc});
+    link_step.addFileInput(fc_stamp);
+    for (fc_flags.items) |flag| link_step.addArg(flag);
 
     // Add all object files (also wires the step dependencies automatically).
     for (object_files.items) |obj| link_step.addFileArg(obj);
 
-    // When zig cc is the linker it does not auto-link the Fortran runtime.
-    if (!use_mpi) {
-        if (resolved_libdir) |libdir| {
-            link_step.addArg(b.fmt("-L{s}", .{libdir}));
-        }
-        link_step.addArgs(&.{ "-lgfortran", "-lm" });
-        if (use_openmp) link_step.addArg("-lgomp");
-    }
-
-    // NetCDF libraries (both MPI and non-MPI builds).
     if (use_netcdf) {
         if (netcdf_base) |base| {
             link_step.addArg(b.fmt("-L{s}/lib", .{base}));
         }
-        link_step.addArgs(&.{ "-lnetcdf", "-lnetcdff" });
+        // Objects precede libs here, so the Fortran wrapper lib must come
+        // before the C lib it depends on.
+        link_step.addArgs(&.{ "-lnetcdff", "-lnetcdf" });
     }
 
     link_step.addArg("-o");
@@ -355,12 +349,16 @@ pub fn build(b: *std.Build) void {
         .ftn => "ftn",
     };
     const make_cmd = b.fmt(
-        "cd src && make clean && make FC={s}{s}{s}{s}",
+        "cd src && make clean && make FC={s}{s}{s}{s}{s}",
         .{
             fc_str,
             if (use_mpi) " USE_MPI=true" else "",
             if (use_netcdf) " USE_NETCDF=true" else "",
             if (use_openmp) " USE_OPENMP=true" else "",
+            if (use_netcdf and netcdf_base != null)
+                b.fmt(" NETCDFBASE={s}", .{netcdf_base.?})
+            else
+                "",
         },
     );
     const bench_make_step = b.addSystemCommand(&.{ "sh", "-c", make_cmd });

@@ -48,18 +48,15 @@ const Params = struct {
 
 // ── Argument parsing ──────────────────────────────────────────────────────────
 
-fn parseArgs(alloc: std.mem.Allocator, p: *Params) !void {
-    const args = try std.process.argsAlloc(alloc);
-    defer std.process.argsFree(alloc, args);
-
+fn parseArgs(io: std.Io, args: []const [:0]const u8, p: *Params) !void {
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
         const arg = args[i];
 
         if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
-            const out = std.fs.File.stdout();
+            const out = std.Io.File.stdout();
             var buf: [4096]u8 = undefined;
-            var w = out.writer(&buf);
+            var w = out.writer(io, &buf);
             try w.interface.writeAll(
                 \\Usage: generate_namelist [--key value | --key=value] ...
                 \\
@@ -168,9 +165,9 @@ fn parseFloat(s: []const u8) !f64 {
 
 // ── Namelist output ───────────────────────────────────────────────────────────
 
-fn writeNamelist(file: std.fs.File, p: Params) !void {
+fn writeNamelist(io: std.Io, file: std.Io.File, p: Params) !void {
     var buf: [65536]u8 = undefined;
-    var w = file.writer(&buf);
+    var w = file.writer(io, &buf);
     const iw = &w.interface;
 
     try iw.print(
@@ -225,26 +222,31 @@ fn writeNamelist(file: std.fs.File, p: Params) !void {
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const alloc = gpa.allocator();
+pub fn main(init: std.process.Init) !void {
+    const alloc = init.gpa;
+
+    var args: std.ArrayList([:0]const u8) = .empty;
+    defer args.deinit(alloc);
+    var it: std.process.Args.Iterator = .init(init.minimal.args);
+    defer it.deinit();
+    while (it.next()) |arg| try args.append(alloc, arg);
 
     var params = Params{};
-    try parseArgs(alloc, &params);
+    try parseArgs(init.io, args.items, &params);
 
-    try std.fs.cwd().makePath("run");
+    const cwd = std.Io.Dir.cwd();
+    try cwd.createDirPath(init.io, "run");
 
-    const file = try std.fs.cwd().createFile("run/namelist.input", .{
+    const file = try cwd.createFile(init.io, "run/namelist.input", .{
         .truncate = true,
     });
-    defer file.close();
+    defer file.close(init.io);
 
-    try writeNamelist(file, params);
+    try writeNamelist(init.io, file, params);
 
-    const stdout = std.fs.File.stdout();
+    const stdout = std.Io.File.stdout();
     var buf: [256]u8 = undefined;
-    var w = stdout.writer(&buf);
+    var w = stdout.writer(init.io, &buf);
     try w.interface.writeAll("Generated run/namelist.input\n");
     try w.interface.flush();
 }
